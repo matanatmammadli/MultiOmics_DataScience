@@ -1,0 +1,146 @@
+---
+title: "DS"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library(TCGAbiolinks)
+library(survminer)
+library(survival)
+```
+```{r}
+# getting clinical data for TCGA-BRCA cohort -------------------
+clinical_brca <- GDCquery_clinic("TCGA-ESCA")
+any(colnames(clinical_brca) %in% c("vital_status", "days_to_last_follow_up", "days_to_death"))
+which(colnames(clinical_brca) %in% c("vital_status", "days_to_last_follow_up", "days_to_death"))
+```
+```{r}
+clinical_brca[,c(9,43,48)]
+# looking at some variables associated with survival 
+table(clinical_brca$vital_status)
+```
+```{r}
+# change certain values the way they are encoded
+clinical_brca$deceased <- ifelse(clinical_brca$vital_status == "Alive", FALSE, TRUE)
+
+# create an "overall survival" variable that is equal to days_to_death
+# for dead patients, and to days_to_last_follow_up for patients who
+# are still alive
+clinical_brca$overall_survival <- ifelse(clinical_brca$vital_status == "Alive",
+                                         clinical_brca$days_to_last_follow_up,
+                                         clinical_brca$days_to_death)
+```
+```{r}
+# build a query to get gene expression data for entire cohort
+query_brca_all = GDCquery(
+  project = "TCGA-ESCA",
+  data.category = "Transcriptome Profiling", # parameter enforced by GDCquery
+  experimental.strategy = "RNA-Seq",
+  workflow.type = "STAR - Counts",
+  data.type = "Gene Expression Quantification",
+  access = "open")
+```
+```{r}
+output_brca <- getResults(query_brca_all)
+# get primary tissue sample barcodes
+tumor <- output_brca$cases#[1:50]
+```
+
+```{r}
+# # get gene expression data from  primary tumors 
+query_brca <- GDCquery(
+  project = "TCGA-ESCA",
+  data.category = "Transcriptome Profiling", # parameter enforced by GDCquery
+  experimental.strategy = "RNA-Seq",
+  workflow.type = "STAR - Counts",
+  data.type = "Gene Expression Quantification",
+  sample.type = c("Primary Tumor", "Solid Tissue Normal"),
+  access = "open",
+  barcode = tumor)
+```
+```{r}
+# download data
+GDCdownload(query_brca)
+library(SummarizedExperiment)
+# get counts
+tcga_brca_data <- GDCprepare(query_brca, summarizedExperiment = T)
+brca_matrix <- assay(tcga_brca_data)
+brca_matrix[1:10,1:10]
+```
+
+```{r}
+# extract gene and sample metadata from summarizedExperiment object
+gene_metadata <- as.data.frame(rowData(tcga_brca_data))
+coldata <- as.data.frame(colData(tcga_brca_data))
+```
+
+```{r}
+# vst transform counts to be used in survival analysis ---------------
+library(DESeq2)
+# Setting up countData object   
+dds <- DESeqDataSetFromMatrix(countData = brca_matrix,
+                              colData = coldata,
+                              design = ~ 1)
+
+# Removing genes with sum total of 10 reads across all samples
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+```
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(tibble)
+# vst 
+vsd <- vst(dds, blind=FALSE)
+brca_matrix_vst <- assay(vsd)
+brca_matrix_vst[1:10,1:10]
+# Get data for TP53 gene and add gene metadata information to it -------------
+brca_tp53 <- brca_matrix_vst %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = 'gene_id') %>% 
+  gather(key = 'case_id', value = 'counts', -gene_id) %>% 
+  left_join(., gene_metadata, by = "gene_id") %>% 
+  filter(gene_name == "TRIP13")
+# get median value
+median_value <- median(brca_tp53$counts)
+
+# denote which cases have higher   lower expression than median count
+brca_tp53$strata <- ifelse(brca_tp53$counts >= median_value, "HIGH", "LOW")
+
+# Add clinical information to brca_tp53
+brca_tp53$case_id <- gsub('-01.*', '', brca_tp53$case_id)
+brca_tp53 <- merge(brca_tp53, clinical_brca, by.x = 'case_id', by.y = 'submitter_id')
+# Convert days to months for overall_survival variable
+brca_tp53$overall_survival <- brca_tp53$overall_survival / 30
+
+```
+```{r}
+# fitting survival curve -----------
+fit <- survfit(Surv(overall_survival, deceased) ~ strata, data = brca_tp53)
+ggsurvplot(fit,
+           data = brca_tp53,
+           risk.table = T)
+```
+
+
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
